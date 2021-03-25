@@ -1,0 +1,108 @@
+name: Log latest release
+on:
+  push:
+    branches: [ master ]
+  #schedule:
+  #  - cron: "1 * * * *"
+
+jobs:
+  logLatestRelease:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: get-github-version
+        id: get-github-version
+        run: |
+          github_version=$(curl -s \
+           -H "Accept: application/vnd.github.v3+json" \
+             https://api.github.com/repos/actions/runner/releases/latest | jq '.tag_name' | sed -e 's/^"//' -e 's/"$//')
+          echo "github_version_env=${github_version}" >> $GITHUB_ENV
+
+      - uses: chrislennon/action-aws-cli@v1.1
+
+      - name: get-marketron-version
+        run: |
+          echo "m_version_env::$(IFS=\; aws ecr describe-images --repository-name github-runner | grep -A1 imageTags | grep -v 'imageTags' | grep -v '\-\-' | sort -r)" >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: "us-east-1"
+
+      - name: compare-versions
+        run: |
+          echo "::warning github_version_env = ${github_version_env}"
+          echo "::warning s_version_env = ${s_version_env}"
+          echo "::warning m_version_env = ${m_version_env}"
+
+      - name: ensure-valid-data
+        run: |
+          # github_version_env should be at least v2.273.4 (8) characters long
+          length=${#github_version_env}
+          echo "length = $length"
+          if [ "$length" -lt 8 ] || [ "$length" -gt 10 ]
+          then
+              echo "length of github_version_env is out of bounds"
+              echo "value of github_version_env is ${github_version_env}"
+              exit 1
+          else
+              echo "length is OK"
+          fi
+
+          length=${#m_version_env}
+          if [ "$length" -lt 6 ]
+          then
+              echo "length of m_version_env is out of bounds"
+              echo "value of m_version_env is ${m_version_env}"
+              exit 1
+          else
+              echo "length is OK"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: do-we-build-marketron-github-runner
+        id: do-we-build-marketron-github-runner
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: "github-runner"
+        run: |
+          result=$(echo $m_version_env  | grep $github_version_env || echo "not_found")
+          echo "result = $result"
+          if [ "$result" = "not_found" ]
+          then
+            echo "::warning we are going to build marketron image"
+            echo "::warning m_version_env = $m_version_env"
+            echo "::warning github_version_env = $github_version_env"
+            echo "::warning result = $result"
+
+            docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$github_version_env .
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:$github_version_env
+            echo "publish_to_harness=true" >> $GITHUB_ENV
+          else
+            echo "marketron image is up to date."
+          fi
+
+      # - name: Publish in harness
+      #   id: harness-publish
+      #   uses: InVisionApp/private-action-loader@v3
+      #   if: ${{ env.publish_to_harness == 'true' }}
+      #   with:
+      #     pal-repo-token: ${{ secrets.JENKINSMKTN_ACTIONS_TOKEN }}
+      #     pal-repo-name: Marketron/devops-actions@v2
+      #     type: deploy
+      #     harness_account_id: ${{ secrets.HARNESS_ACCOUNT_ID }}
+      #     harness_api_key: ${{ secrets.HARNESS_API_KEY }}
+      #     application_name: "github-runner"
+      #     environment: "github"
+      #     build: ${{ env.github_version }}
